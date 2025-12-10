@@ -1,0 +1,7 @@
+app/.env
+
+venv/
+.mypy_cache/
+.vscode/
+__pycache__/
+.git/
