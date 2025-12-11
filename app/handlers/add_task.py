@@ -2,9 +2,12 @@ from aiogram import Router, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from datetime import datetime
+from datetime import datetime, timedelta
+
 from app.database.dao.task import TaskDAO
 from app.database.dao.user import UserDAO
+from app.database.dao.gamification import GamificationDAO
+from app.constants.gamification import ACHIEVEMENTS
 from app.keyboards.reply import get_main_keyboard
 
 router = Router()
@@ -25,7 +28,6 @@ async def cmd_add_task(message: types.Message, state: FSMContext):
     await state.set_state(AddTaskStates.waiting_for_title)
 
 
-# Хендлер для кнопки "Добавить задачу"
 @router.message(lambda message: message.text == "➕ Добавить задачу")
 async def add_task_button(message: types.Message, state: FSMContext):
     await cmd_add_task(message, state)
@@ -74,7 +76,8 @@ async def process_priority(message: types.Message, state: FSMContext):
         keyboard=[
             [types.KeyboardButton(text="Пропустить")],
             [types.KeyboardButton(text="Сегодня")],
-            [types.KeyboardButton(text="Завтра")]
+            [types.KeyboardButton(text="Завтра")],
+            [types.KeyboardButton(text="Через неделю")]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
@@ -91,16 +94,17 @@ async def process_priority(message: types.Message, state: FSMContext):
 
 @router.message(AddTaskStates.waiting_for_due_date)
 async def process_due_date(message: types.Message, state: FSMContext):
-    from datetime import datetime
-
     due_date = None
+    today = datetime.now().date()
 
     if message.text.lower() == "пропустить":
         due_date = None
     elif message.text.lower() == "сегодня":
-        due_date = datetime.now().date()
+        due_date = today
     elif message.text.lower() == "завтра":
-        due_date = datetime.now().date().replace(day=datetime.now().day + 1)
+        due_date = today + timedelta(days=1)
+    elif message.text.lower() == "через неделю":
+        due_date = today + timedelta(days=7)
     else:
         try:
             due_date = datetime.strptime(message.text, "%d.%m.%Y").date()
@@ -113,19 +117,46 @@ async def process_due_date(message: types.Message, state: FSMContext):
 
     await state.update_data(due_date=due_date)
 
-    # Создаем задачу
+    # Получаем данные из состояния
     data = await state.get_data()
 
     # Получаем или создаем пользователя в базе данных
     db_user = await UserDAO.get_or_create_user(message.from_user)
 
+    # Создаем задачу
     task = await TaskDAO.create_and_get_task(
-        user_id=db_user.id,  # Используем внутренний ID пользователя из базы данных
+        user_id=db_user.id,
         title=data['title'],
         description=data['description'],
         priority=data.get('priority', 1),
         due_date=datetime.combine(data['due_date'], datetime.min.time()) if data['due_date'] else None
     )
+
+    # === ГЕЙМИФИКАЦИЯ ===
+
+    # Увеличиваем счётчик созданных задач
+    await GamificationDAO.increment_created(db_user.id)
+
+    # Проверяем достижения
+    new_achievements = await GamificationDAO.check_and_unlock_achievements(db_user.id)
+
+    # Формируем текст достижений
+    achievement_text = ""
+    total_bonus_xp = 0
+
+    if new_achievements:
+        achievement_text = "\n\n🏆 <b>Новые достижения:</b>"
+        for ach_id in new_achievements:
+            ach = ACHIEVEMENTS.get(ach_id)
+            if ach:
+                achievement_text += f"\n{ach.icon} <b>{ach.name}</b>"
+                if ach.xp_reward > 0:
+                    achievement_text += f" (+{ach.xp_reward} XP)"
+                    total_bonus_xp += ach.xp_reward
+
+        # Добавляем бонусный XP за достижения
+        if total_bonus_xp > 0:
+            await GamificationDAO.add_xp(db_user.id, total_bonus_xp)
 
     # Форматируем статус для красивого отображения
     status_display = {
@@ -138,9 +169,10 @@ async def process_due_date(message: types.Message, state: FSMContext):
         f"✅ <b>Задача создана!</b>\n\n"
         f"<b>Название:</b> {task.title}\n"
         f"<b>Описание:</b> {task.description}\n"
-        f"<b>Приоритет:</b> {task.priority}\n"
+        f"<b>Приоритет:</b> {'⭐' * min(task.priority, 5)} ({task.priority}/10)\n"
         f"<b>Срок:</b> {task.due_date.strftime('%d.%m.%Y') if task.due_date else 'Не установлен'}\n"
-        f"<b>Статус:</b> {status_display}",
+        f"<b>Статус:</b> {status_display}"
+        f"{achievement_text}",
         parse_mode="HTML",
         reply_markup=get_main_keyboard()
     )

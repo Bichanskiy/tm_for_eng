@@ -5,6 +5,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Boolean,
     func
 )
 from sqlalchemy.orm import relationship
@@ -36,7 +37,10 @@ class Task(Base):
         server_default=func.now()
     )
     due_date = Column(DateTime(timezone=True), nullable=True)
-
     completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Флаги для напоминаний
+    reminder_sent = Column(Boolean, default=False)  # Отправлено ли напоминание о приближающемся сроке
+    overdue_reminder_sent = Column(Boolean, default=False)  # Отправлено ли напоминание о просрочке
 
     user = relationship("User", back_populates="tasks")
